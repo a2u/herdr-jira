@@ -17,6 +17,7 @@ pub enum View {
     TransitionPicker,
     AgentPicker,
     SearchInput,
+    JqlInput,
     Help,
 }
 
@@ -67,6 +68,8 @@ pub struct App {
     pub agents_loading: bool,
 
     pub search_input: String,
+    pub jql_input: String,
+    pub last_jql: String,
     pub detail_scroll: u16,
 
     pub toast: Option<(String, bool, Instant)>, // message, is_error, shown_at
@@ -106,6 +109,8 @@ impl App {
             agents: vec![],
             agents_loading: false,
             search_input: String::new(),
+            jql_input: String::new(),
+            last_jql: String::new(),
             detail_scroll: 0,
             toast: None,
         };
@@ -144,6 +149,7 @@ impl App {
 
     fn spawn_search(&mut self, jql: String, title: String) {
         let Some(client) = self.client.clone() else { return };
+        self.last_jql = jql.clone();
         self.loading = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -323,6 +329,7 @@ impl App {
             View::TransitionPicker => self.keys_transition_picker(key),
             View::AgentPicker => self.keys_agent_picker(key),
             View::SearchInput => self.keys_search(key),
+            View::JqlInput => self.keys_jql(key),
             View::Help => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.view = View::List,
                 _ => {}
@@ -375,6 +382,10 @@ impl App {
                 self.search_input.clear();
                 self.view = View::SearchInput;
             }
+            KeyCode::Char('J') => {
+                self.jql_input = self.last_jql.clone();
+                self.view = View::JqlInput;
+            }
             KeyCode::Char('r') => self.load_filter(self.filter_idx),
             KeyCode::Char('R') => {
                 self.reload_config();
@@ -409,7 +420,23 @@ impl App {
         }
     }
 
+    /// Number hotkeys shared by all popup pickers: `1`-`9` picks that row.
+    fn picker_number(key: &KeyEvent, len: usize) -> Option<usize> {
+        if let KeyCode::Char(c @ '1'..='9') = key.code {
+            let idx = (c as u8 - b'1') as usize;
+            if idx < len {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
     fn keys_filter_picker(&mut self, key: KeyEvent) {
+        if let Some(idx) = Self::picker_number(&key, self.cfg.filters.len()) {
+            self.view = View::List;
+            self.load_filter(idx);
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.view = View::List,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -427,6 +454,13 @@ impl App {
     }
 
     fn keys_transition_picker(&mut self, key: KeyEvent) {
+        if let Some(idx) = Self::picker_number(&key, self.transitions.len()) {
+            if let Some(t) = self.transitions.get(idx).cloned() {
+                self.view = View::List;
+                self.apply_transition(t);
+            }
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.view = View::List,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -446,6 +480,13 @@ impl App {
     }
 
     fn keys_agent_picker(&mut self, key: KeyEvent) {
+        if let Some(idx) = Self::picker_number(&key, self.agents.len()) {
+            if let Some(agent) = self.agents.get(idx).cloned() {
+                self.view = View::List;
+                self.delegate_to(agent);
+            }
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.view = View::List,
             KeyCode::Char('j') | KeyCode::Down => {
@@ -478,6 +519,28 @@ impl App {
                 self.search_input.pop();
             }
             KeyCode::Char(c) => self.search_input.push(c),
+            _ => {}
+        }
+    }
+
+    fn keys_jql(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.view = View::List,
+            KeyCode::Enter => {
+                let jql = self.jql_input.trim().to_string();
+                self.view = View::List;
+                if !jql.is_empty() {
+                    let expanded = self.cfg.expand_jql(&jql);
+                    self.spawn_search(expanded, "custom JQL".into());
+                }
+            }
+            KeyCode::Backspace => {
+                self.jql_input.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jql_input.clear();
+            }
+            KeyCode::Char(c) => self.jql_input.push(c),
             _ => {}
         }
     }

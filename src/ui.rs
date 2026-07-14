@@ -32,6 +32,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::TransitionPicker => draw_transition_picker(f, app),
         View::AgentPicker => draw_agent_picker(f, app),
         View::SearchInput => draw_search(f, app),
+        View::JqlInput => draw_jql(f, app),
         View::Help => draw_help(f),
         _ => {}
     }
@@ -179,8 +180,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.view {
         View::Detail => "Esc back  ·  j/k scroll  ·  s status  ·  d delegate  ·  o browser  ·  z zoom",
         View::SearchInput => "Enter search  ·  Esc cancel",
+        View::JqlInput => "Enter run JQL  ·  Ctrl-U clear  ·  Esc cancel",
         View::FilterPicker | View::TransitionPicker | View::AgentPicker => {
-            "j/k move  ·  Enter select  ·  Esc cancel"
+            "1-9 quick pick  ·  j/k move  ·  Enter select  ·  Esc cancel"
         }
         _ => "Enter open  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  z zoom  ·  r refresh  ·  ? help  ·  q quit",
     };
@@ -259,8 +261,10 @@ fn draw_transition_picker(f: &mut Frame, app: &App) {
     let items: Vec<ListItem> = app
         .transitions
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             ListItem::new(Line::from(vec![
+                num_span(i),
                 Span::raw(t.name.clone()),
                 Span::styled(format!("  → {}", t.to_status), Style::new().fg(Color::DarkGray)),
             ]))
@@ -287,7 +291,8 @@ fn draw_agent_picker(f: &mut Frame, app: &App) {
     let items: Vec<ListItem> = app
         .agents
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let status_color = match a.status.as_str() {
                 "idle" | "done" => Color::Green,
                 "working" => Color::Yellow,
@@ -296,6 +301,7 @@ fn draw_agent_picker(f: &mut Frame, app: &App) {
             };
             let cwd = short_path(&a.cwd);
             ListItem::new(Line::from(vec![
+                num_span(i),
                 Span::styled(format!("{:<10}", a.label), Style::new().fg(ACCENT).bold()),
                 Span::styled(format!("{:<9}", a.status), Style::new().fg(status_color)),
                 Span::styled(format!("{:<8}", a.pane_id), Style::new().fg(Color::DarkGray)),
@@ -304,6 +310,16 @@ fn draw_agent_picker(f: &mut Frame, app: &App) {
         })
         .collect();
     render_picker_list(f, inner, items, app.picker_sel);
+}
+
+/// "1. " index prefix shown in pickers — rows past 9 have no hotkey.
+fn num_span(i: usize) -> Span<'static> {
+    let text = if i < 9 {
+        format!("{}. ", i + 1)
+    } else {
+        "   ".to_string()
+    };
+    Span::styled(text, Style::new().fg(Color::DarkGray))
 }
 
 fn short_path(p: &str) -> String {
@@ -326,6 +342,18 @@ fn draw_search(f: &mut Frame, app: &App) {
     );
 }
 
+fn draw_jql(f: &mut Frame, app: &App) {
+    let inner = popup(f, "custom JQL", 80, 4);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(app.jql_input.clone()),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+        ]))
+        .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
 fn draw_help(f: &mut Frame) {
     let inner = popup(f, "help", 60, 18);
     let rows = [
@@ -333,6 +361,8 @@ fn draw_help(f: &mut Frame) {
         ("Enter", "open issue details"),
         ("f, 1-9", "switch filter"),
         ("/", "search (text ~ query)"),
+        ("J", "run custom JQL (prefilled with current)"),
+        ("1-9", "quick pick in any popup"),
         ("s", "change issue status"),
         ("d", "delegate issue to an agent"),
         ("o", "open issue in browser"),

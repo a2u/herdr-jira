@@ -18,7 +18,8 @@ from a configurable template (issue key, summary, description, link, …).
 
 - **Filters** — named JQL filters from the config (`f` or `1`–`9`): my issues,
   a specific project, anything JQL can express.
-- **Search** — `/` runs a `text ~ "…"` search (template configurable).
+- **Search** — `/` runs a `text ~ "…"` search (template configurable), and `J`
+  runs any raw JQL you type, prefilled with the current query for quick tweaks.
 - **Issue details** — `Enter` opens a scrollable view with the description
   (Cloud ADF documents are flattened to plain text).
 - **Status transitions** — `s` lists the transitions available for the issue
@@ -120,8 +121,10 @@ command = "herdr-jira.open-jira-tab"
 | `Enter` | open issue details |
 | `f`, `1`–`9` | switch filter |
 | `/` | search |
+| `J` | run a custom JQL query (prefilled with the current one) |
 | `s` | change issue status |
 | `d` | delegate issue to a running agent |
+| `1`–`9` | quick pick inside any popup (agents, transitions, filters) |
 | `o` | open issue in the browser |
 | `r` | refresh current filter |
 | `R` | reload config |
