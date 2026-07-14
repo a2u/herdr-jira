@@ -1,0 +1,45 @@
+# herdr-plugin.toml — manifest for the herdr-jira plugin.
+#
+# A keyboard-driven Jira TUI that lives in a herdr split pane (or its own tab):
+# browse configurable JQL filters (my issues, per-project, ...), search, change
+# issue status, and delegate an issue to any agent running in herdr — the agent
+# receives a prompt built from a configurable template (issue key, summary,
+# description, URL, ...).
+#
+# Configuration lives OUTSIDE the plugin checkout, in the herdr-managed config
+# dir (see `herdr plugin config-dir herdr-jira`):
+#   ~/.config/herdr/plugins/config/herdr-jira/config.toml
+# Copy config.example.toml there and fill in your Jira credentials.
+
+id = "herdr-jira"
+name = "herdr-jira"
+version = "0.1.0"
+description = "Jira TUI in a herdr pane: JQL filters, search, status transitions, and one-key delegation of issues to running agents."
+min_herdr_version = "0.7.0"
+platforms = ["linux", "macos"]
+
+# Build from source at install/link time (requires a Rust toolchain).
+[[build]]
+command = ["/bin/sh", "scripts/build.sh"]
+
+# The Jira pane. `placement = "split"` opens it beside the current pane; the
+# tab launcher below overrides placement at open time.
+[[panes]]
+id = "jira"
+title = "Jira"
+placement = "split"
+command = ["./target/release/herdr-jira"]
+
+# Open the Jira TUI in a split beside the current pane (focus if already open).
+[[actions]]
+id = "open-jira"
+title = "Jira: open (split)"
+description = "Open the Jira TUI in a split pane beside the current work."
+command = ["bash", "scripts/open-jira.sh"]
+
+# Open the Jira TUI in its own tab (focus if already open).
+[[actions]]
+id = "open-jira-tab"
+title = "Jira: open (tab)"
+description = "Open the Jira TUI in its own tab."
+command = ["bash", "scripts/open-jira-tab.sh"]

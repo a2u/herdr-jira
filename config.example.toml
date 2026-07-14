@@ -1,0 +1,80 @@
+# herdr-jira configuration.
+#
+# Copy this file to the plugin config dir and edit it:
+#   mkdir -p "$(herdr plugin config-dir herdr-jira)"
+#   cp config.example.toml "$(herdr plugin config-dir herdr-jira)/config.toml"
+#
+# The running pane reloads the config on `R` (capital R).
+
+[jira]
+# Base URL of your Jira instance (Cloud or Server/Data Center), no trailing slash.
+base_url = "https://yourcompany.atlassian.net"
+
+# --- Authentication ---
+# "basic"  = Jira Cloud: email + API token (create one at
+#            https://id.atlassian.com/manage-profile/security/api-tokens)
+# "bearer" = Jira Server / Data Center: personal access token (email not needed)
+auth = "basic"
+email = "you@company.com"
+
+# Provide the token either inline...
+api_token = ""
+# ...or (recommended) via a shell command that prints it, e.g. macOS Keychain:
+#   security add-generic-password -s jira-api-token -a "$USER" -w '<TOKEN>'
+# api_token_cmd = "security find-generic-password -s jira-api-token -w"
+
+# Default project key. Substituted for {project} in filters and search JQL.
+default_project = "PROJ"
+
+# Max issues fetched per filter/search.
+max_results = 50
+
+# --- Filters ---
+# Named JQL filters, switchable in the TUI with `f` (or keys 1-9).
+# Placeholders: {project} -> jira.default_project.
+# If no filters are defined, two defaults are used: "My open issues" and,
+# when default_project is set, "Project {project}".
+
+[[filters]]
+name = "My open issues"
+jql = "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
+
+[[filters]]
+name = "Project board"
+jql = "project = {project} AND statusCategory != Done ORDER BY updated DESC"
+
+[[filters]]
+name = "Recently updated"
+jql = "project = {project} ORDER BY updated DESC"
+
+[search]
+# JQL template used by `/` search. Placeholders: {query}, {project}.
+jql = 'text ~ "{query}" ORDER BY updated DESC'
+# To scope search to the default project instead:
+# jql = 'project = {project} AND text ~ "{query}" ORDER BY updated DESC'
+
+[delegate]
+# Prompt sent to the agent you pick with `d`. Placeholders:
+#   {key} {summary} {description} {url} {status} {assignee} {reporter}
+#   {priority} {type} {labels}
+prompt = """
+You are asked to work on Jira issue {key}: {summary}
+
+Status: {status} | Assignee: {assignee} | Priority: {priority} | Type: {type}
+Link: {url}
+
+Description:
+{description}
+
+Please analyze the issue, implement the fix or feature it describes, and
+summarize what you changed when you are done.
+"""
+
+# Press Enter in the agent pane after sending the prompt (submit it).
+submit = true
+
+# Delay between sending the text and pressing Enter, in milliseconds.
+submit_delay_ms = 500
+
+# Truncate very long descriptions in the prompt to this many characters.
+max_description_chars = 6000
