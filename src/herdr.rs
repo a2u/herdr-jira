@@ -30,7 +30,13 @@ fn run(args: &[&str]) -> Result<Value, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    serde_json::from_slice(&out.stdout)
+    // Some commands print nothing on success (e.g. send-keys proxied to a
+    // mirror-plugin pane) — a clean exit with empty output is still success.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(&stdout)
         .map_err(|e| format!("herdr {}: bad JSON: {e}", args.join(" ")))
 }
 
