@@ -177,12 +177,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     let hints = match app.view {
-        View::Detail => "Esc back  ·  j/k scroll  ·  s status  ·  d delegate  ·  o browser",
+        View::Detail => "Esc back  ·  j/k scroll  ·  s status  ·  d delegate  ·  o browser  ·  z zoom",
         View::SearchInput => "Enter search  ·  Esc cancel",
         View::FilterPicker | View::TransitionPicker | View::AgentPicker => {
             "j/k move  ·  Enter select  ·  Esc cancel"
         }
-        _ => "Enter open  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  o browser  ·  r refresh  ·  ? help  ·  q quit",
+        _ => "Enter open  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  z zoom  ·  r refresh  ·  ? help  ·  q quit",
     };
     f.render_widget(
         Paragraph::new(hints).style(Style::new().fg(Color::DarkGray)),
@@ -336,6 +336,7 @@ fn draw_help(f: &mut Frame) {
         ("s", "change issue status"),
         ("d", "delegate issue to an agent"),
         ("o", "open issue in browser"),
+        ("z", "zoom pane (fullscreen toggle)"),
         ("r", "refresh current filter"),
         ("R", "reload config.toml"),
         ("g/G", "top / bottom"),

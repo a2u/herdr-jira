@@ -222,6 +222,12 @@ impl App {
         });
     }
 
+    fn zoom_toggle(&mut self) {
+        if let Err(e) = herdr::zoom_toggle() {
+            self.toast(format!("zoom: {e}"), true);
+        }
+    }
+
     fn open_in_browser(&mut self) {
         let Some(issue) = self.selected_issue() else { return };
         let url = issue.url.clone();
@@ -377,6 +383,7 @@ impl App {
             KeyCode::Char('s') => self.request_transitions(),
             KeyCode::Char('d') => self.request_agents(),
             KeyCode::Char('o') => self.open_in_browser(),
+            KeyCode::Char('z') => self.zoom_toggle(),
             KeyCode::Char('?') => self.view = View::Help,
             _ => {}
         }
@@ -397,6 +404,7 @@ impl App {
             KeyCode::Char('s') => self.request_transitions(),
             KeyCode::Char('d') => self.request_agents(),
             KeyCode::Char('o') => self.open_in_browser(),
+            KeyCode::Char('z') => self.zoom_toggle(),
             _ => {}
         }
     }

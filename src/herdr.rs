@@ -84,6 +84,17 @@ pub fn send_to_agent(
     Ok(())
 }
 
+/// Toggle fullscreen (zoom) for our own pane. Only works when running inside
+/// a herdr pane (HERDR_PANE_ID is set by herdr for plugin panes).
+pub fn zoom_toggle() -> Result<(), String> {
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| "not running inside a herdr pane".to_string())?;
+    run(&["pane", "zoom", &pane, "--toggle"])?;
+    Ok(())
+}
+
 /// Show a herdr toast notification (best effort).
 pub fn notify(message: &str) {
     let _ = Command::new(herdr_bin())
