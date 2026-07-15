@@ -13,7 +13,7 @@
 
 id = "herdr-jira"
 name = "herdr-jira"
-version = "0.1.0"
+version = "0.2.0"
 description = "Jira TUI in a herdr pane: JQL filters, search, status transitions, and one-key delegation of issues to running agents."
 min_herdr_version = "0.7.0"
 platforms = ["linux", "macos"]
