@@ -1,7 +1,7 @@
 //! Rendering. One draw function per view; popup pickers render on top of the
 //! issue list.
 
-use crate::app::{App, View};
+use crate::app::{is_epic, App, View};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -47,6 +47,17 @@ fn status_color(category: &str) -> Color {
     }
 }
 
+fn type_style(issue_type: &str) -> Style {
+    match issue_type.to_ascii_lowercase().as_str() {
+        "epic" => Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        "bug" | "defect" => Style::new().fg(Color::Red),
+        "story" => Style::new().fg(Color::Green),
+        "task" => Style::new().fg(Color::Blue),
+        "sub-task" | "subtask" => Style::new().fg(Color::Cyan),
+        _ => Style::new().fg(Color::Gray),
+    }
+}
+
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.current_title.is_empty() {
         "Jira".to_string()
@@ -63,12 +74,22 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         ]))
         .title_alignment(Alignment::Left);
 
-    let rows: Vec<Row> = app
-        .issues
+    let visible = app.visible();
+    let rows: Vec<Row> = visible
         .iter()
-        .map(|i| {
+        .map(|&(i, depth)| {
+            // Epics carry an expand indicator; their children are indented.
+            let (prefix, key_style) = if is_epic(i) {
+                let arrow = if app.expanded.contains(&i.key) { "▾ " } else { "▸ " };
+                (arrow.to_string(), Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+            } else if depth > 0 {
+                (" └ ".to_string(), Style::new().fg(ACCENT))
+            } else {
+                ("  ".to_string(), Style::new().fg(ACCENT))
+            };
             Row::new(vec![
-                Cell::from(i.key.clone()).style(Style::new().fg(ACCENT)),
+                Cell::from(format!("{prefix}{}", i.key)).style(key_style),
+                Cell::from(i.issue_type.clone()).style(type_style(&i.issue_type)),
                 Cell::from(i.status.clone()).style(Style::new().fg(status_color(&i.status_category))),
                 Cell::from(i.assignee.clone()).style(Style::new().fg(Color::Magenta)),
                 Cell::from(i.updated.clone()).style(Style::new().fg(Color::DarkGray)),
@@ -77,10 +98,12 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let is_empty = rows.is_empty();
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
+            Constraint::Length(15),
+            Constraint::Length(7),
             Constraint::Length(14),
             Constraint::Length(18),
             Constraint::Length(16),
@@ -88,17 +111,17 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["KEY", "STATUS", "ASSIGNEE", "UPDATED", "SUMMARY"])
+        Row::new(vec!["KEY", "TYPE", "STATUS", "ASSIGNEE", "UPDATED", "SUMMARY"])
             .style(Style::new().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
     )
     .row_highlight_style(Style::new().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .block(block);
 
     let mut state = TableState::default();
-    state.select(if app.issues.is_empty() { None } else { Some(app.selected) });
+    state.select(if is_empty { None } else { Some(app.selected) });
     f.render_stateful_widget(table, area, &mut state);
 
-    if app.issues.is_empty() && !app.loading {
+    if is_empty && !app.loading {
         let empty = Paragraph::new("no issues — press r to refresh, f to pick a filter, / to search")
             .style(Style::new().fg(Color::DarkGray))
             .alignment(Alignment::Center);
@@ -184,7 +207,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         View::FilterPicker | View::TransitionPicker | View::AgentPicker => {
             "1-9 quick pick  ·  j/k move  ·  Enter select  ·  Esc cancel"
         }
-        _ => "Enter open  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  z zoom  ·  r refresh  ·  ? help  ·  q quit",
+        _ => "Enter open  ·  →/← epic  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  z zoom  ·  r refresh  ·  ? help  ·  q quit",
     };
     f.render_widget(
         Paragraph::new(hints).style(Style::new().fg(Color::DarkGray)),
@@ -359,6 +382,7 @@ fn draw_help(f: &mut Frame) {
     let rows = [
         ("j/k ↑/↓", "move / scroll"),
         ("Enter", "open issue details"),
+        ("→/l ←/h", "expand / collapse epic"),
         ("f, 1-9", "switch filter"),
         ("/", "search (text ~ query)"),
         ("J", "run custom JQL (prefilled with current)"),

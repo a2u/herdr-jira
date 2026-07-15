@@ -20,6 +20,9 @@ from a configurable template (issue key, summary, description, link, …).
   a specific project, anything JQL can express.
 - **Search** — `/` runs a `text ~ "…"` search (template configurable), and `J`
   runs any raw JQL you type, prefilled with the current query for quick tweaks.
+- **Epics** — epics stand out with a magenta type badge and a `▸` marker;
+  `→` expands one inline to show its child issues (`parent = …`, with a
+  `"Epic Link"` fallback for Server/DC), `←` collapses it.
 - **Issue details** — `Enter` opens a scrollable view with the description
   (Cloud ADF documents are flattened to plain text).
 - **Status transitions** — `s` lists the transitions available for the issue
@@ -119,6 +122,7 @@ command = "herdr-jira.open-jira-tab"
 | --- | --- |
 | `j`/`k`, `↑`/`↓` | move / scroll |
 | `Enter` | open issue details |
+| `→`/`l`, `←`/`h` | expand / collapse an epic (shows its child issues inline) |
 | `f`, `1`–`9` | switch filter |
 | `/` | search |
 | `J` | run a custom JQL query (prefilled with the current one) |

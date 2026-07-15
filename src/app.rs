@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::herdr::{self, HerdrAgent};
 use crate::jira::{Issue, JiraClient, Transition};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,6 +42,14 @@ pub enum Resp {
         label: String,
         result: Result<(), String>,
     },
+    Children {
+        epic: String,
+        result: Result<Vec<Issue>, String>,
+    },
+}
+
+pub fn is_epic(issue: &Issue) -> bool {
+    issue.issue_type.eq_ignore_ascii_case("epic")
 }
 
 pub struct App {
@@ -52,6 +61,11 @@ pub struct App {
     pub should_quit: bool,
 
     pub issues: Vec<Issue>,
+    /// Epic expansion state: children keyed by epic key, plus which epics are
+    /// currently open and which are still fetching.
+    pub children: HashMap<String, Vec<Issue>>,
+    pub expanded: HashSet<String>,
+    pub loading_children: HashSet<String>,
     pub selected: usize,
     pub current_title: String,
     pub loading: bool,
@@ -97,6 +111,9 @@ impl App {
             view: View::List,
             should_quit: false,
             issues: vec![],
+            children: HashMap::new(),
+            expanded: HashSet::new(),
+            loading_children: HashSet::new(),
             selected: 0,
             current_title: String::new(),
             loading: false,
@@ -137,8 +154,23 @@ impl App {
         }
     }
 
+    /// Rows currently on screen: top-level issues, with the children of every
+    /// expanded epic inlined right below it. `u8` is the indent depth.
+    pub fn visible(&self) -> Vec<(&Issue, u8)> {
+        let mut rows = Vec::with_capacity(self.issues.len());
+        for issue in &self.issues {
+            rows.push((issue, 0));
+            if is_epic(issue) && self.expanded.contains(&issue.key) {
+                if let Some(kids) = self.children.get(&issue.key) {
+                    rows.extend(kids.iter().map(|k| (k, 1)));
+                }
+            }
+        }
+        rows
+    }
+
     pub fn selected_issue(&self) -> Option<&Issue> {
-        self.issues.get(self.selected)
+        self.visible().get(self.selected).map(|(i, _)| *i)
     }
 
     fn toast(&mut self, msg: impl Into<String>, is_error: bool) {
@@ -200,6 +232,65 @@ impl App {
         });
     }
 
+    /// Expand the selected epic (fetching its children on first open).
+    fn expand_epic(&mut self) {
+        let Some(issue) = self.selected_issue() else { return };
+        if !is_epic(issue) {
+            return;
+        }
+        let key = issue.key.clone();
+        if self.expanded.contains(&key) {
+            return;
+        }
+        if self.children.contains_key(&key) {
+            self.expanded.insert(key);
+            return;
+        }
+        let Some(client) = self.client.clone() else { return };
+        if !self.loading_children.insert(key.clone()) {
+            return; // fetch already in flight
+        }
+        self.toast(format!("loading issues in {key}…"), false);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            // Jira Cloud links children via `parent`; classic Server/DC epics
+            // use the "Epic Link" field. Try both.
+            let result = client
+                .search(&format!("parent = {key} ORDER BY created ASC"))
+                .or_else(|_| client.search(&format!("\"Epic Link\" = {key} ORDER BY created ASC")));
+            let _ = tx.send(Resp::Children { epic: key, result });
+        });
+    }
+
+    /// Collapse the selected epic — or, on a child row, collapse its parent
+    /// epic and move the selection onto it.
+    fn collapse_epic(&mut self) {
+        let vis = self.visible();
+        let Some(&(issue, depth)) = vis.get(self.selected) else { return };
+        let epic_key = if depth == 0 {
+            if !(is_epic(issue) && self.expanded.contains(&issue.key)) {
+                return;
+            }
+            issue.key.clone()
+        } else {
+            // Walk back to the nearest top-level row: that's the parent epic.
+            match vis[..self.selected]
+                .iter()
+                .rev()
+                .find(|(_, d)| *d == 0)
+                .map(|(i, _)| i.key.clone())
+            {
+                Some(k) => k,
+                None => return,
+            }
+        };
+        self.expanded.remove(&epic_key);
+        // Land the selection on the epic row itself.
+        if let Some(idx) = self.visible().iter().position(|(i, _)| i.key == epic_key) {
+            self.selected = idx;
+        }
+    }
+
     fn request_agents(&mut self) {
         if self.selected_issue().is_none() {
             return;
@@ -254,8 +345,11 @@ impl App {
                 match result {
                     Ok(issues) => {
                         self.current_title = title;
-                        self.selected = self.selected.min(issues.len().saturating_sub(1));
                         self.issues = issues;
+                        self.children.clear();
+                        self.expanded.clear();
+                        self.loading_children.clear();
+                        self.selected = self.selected.min(self.issues.len().saturating_sub(1));
                     }
                     Err(e) => self.toast(format!("Jira: {e}"), true),
                 }
@@ -304,6 +398,19 @@ impl App {
                 }
                 Err(e) => self.toast(format!("delegate {key}: {e}"), true),
             },
+            Resp::Children { epic, result } => {
+                self.loading_children.remove(&epic);
+                match result {
+                    Ok(kids) if kids.is_empty() => {
+                        self.toast(format!("{epic}: no issues in this epic"), false)
+                    }
+                    Ok(kids) => {
+                        self.children.insert(epic.clone(), kids);
+                        self.expanded.insert(epic);
+                    }
+                    Err(e) => self.toast(format!("{epic}: children: {e}"), true),
+                }
+            }
         }
     }
 
@@ -346,22 +453,21 @@ impl App {
     }
 
     fn keys_list(&mut self, key: KeyEvent) {
+        let vis_len = self.visible().len();
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('j') | KeyCode::Down => {
-                self.selected = Self::move_sel(self.issues.len(), self.selected, 1)
+                self.selected = Self::move_sel(vis_len, self.selected, 1)
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.selected = Self::move_sel(self.issues.len(), self.selected, -1)
+                self.selected = Self::move_sel(vis_len, self.selected, -1)
             }
-            KeyCode::PageDown => {
-                self.selected = Self::move_sel(self.issues.len(), self.selected, 15)
-            }
-            KeyCode::PageUp => self.selected = Self::move_sel(self.issues.len(), self.selected, -15),
+            KeyCode::PageDown => self.selected = Self::move_sel(vis_len, self.selected, 15),
+            KeyCode::PageUp => self.selected = Self::move_sel(vis_len, self.selected, -15),
             KeyCode::Char('g') | KeyCode::Home => self.selected = 0,
-            KeyCode::Char('G') | KeyCode::End => {
-                self.selected = self.issues.len().saturating_sub(1)
-            }
+            KeyCode::Char('G') | KeyCode::End => self.selected = vis_len.saturating_sub(1),
+            KeyCode::Char('l') | KeyCode::Right => self.expand_epic(),
+            KeyCode::Char('h') | KeyCode::Left => self.collapse_epic(),
             KeyCode::Enter => {
                 if self.selected_issue().is_some() {
                     self.detail_scroll = 0;
