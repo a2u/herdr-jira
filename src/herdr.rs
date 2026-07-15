@@ -54,17 +54,23 @@ pub fn list_agents() -> Result<Vec<HerdrAgent>, String> {
             if !own_pane.is_empty() && pane_id == own_pane {
                 return None;
             }
+            // `agent list` also returns plain panes with no detected agent
+            // (no label, status "unknown") — those are not delegable.
+            let label = a["display_agent"]
+                .as_str()
+                .or_else(|| a["agent"].as_str())?
+                .to_string();
+            let status = a["agent_status"].as_str().unwrap_or("unknown").to_string();
+            if status == "unknown" {
+                return None;
+            }
             Some(HerdrAgent {
                 target: a["terminal_id"]
                     .as_str()
                     .unwrap_or(pane_id.as_str())
                     .to_string(),
-                label: a["display_agent"]
-                    .as_str()
-                    .or_else(|| a["agent"].as_str())
-                    .unwrap_or("agent")
-                    .to_string(),
-                status: a["agent_status"].as_str().unwrap_or("unknown").to_string(),
+                label,
+                status,
                 cwd: a["cwd"].as_str().unwrap_or("").to_string(),
                 pane_id,
             })
