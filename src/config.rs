@@ -52,6 +52,16 @@ impl Default for SearchConfig {
     }
 }
 
+/// One agent binary that can be spawned via `herdr agent start` when
+/// delegating with "start new agent".
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpawnAgent {
+    /// Display label and default herdr agent name prefix (e.g. "claude").
+    pub name: String,
+    /// Argv passed after `--` to `herdr agent start` (e.g. `["claude"]`).
+    pub command: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DelegateConfig {
     #[serde(default = "default_prompt")]
@@ -62,6 +72,30 @@ pub struct DelegateConfig {
     pub submit_delay_ms: u64,
     #[serde(default = "default_max_desc")]
     pub max_description_chars: usize,
+    /// Agents offered when starting a new one (not only listing running).
+    #[serde(default = "default_spawn_agents")]
+    pub agents: Vec<SpawnAgent>,
+    /// Preferred cwd prefilled / listed first when starting a new agent.
+    #[serde(default)]
+    pub default_cwd: String,
+    /// Where to put a newly started agent:
+    ///   "tab"   — new tab in the chosen workspace (default)
+    ///   "right" — split right in the chosen workspace
+    ///   "down"  — split down in the chosen workspace
+    /// Legacy alias: `split` is accepted with the same values.
+    #[serde(default = "default_placement", alias = "split")]
+    pub placement: String,
+    /// Focus the new agent pane / tab after start.
+    #[serde(default)]
+    pub focus_new: bool,
+    /// Always wait this long after `agent start` before sending the prompt
+    /// (gives the CLI time to paint its input). Milliseconds.
+    #[serde(default = "default_startup_delay")]
+    pub startup_delay_ms: u64,
+    /// After the startup delay, wait up to this many ms for the agent to
+    /// report `idle` before sending. 0 skips the wait.
+    #[serde(default = "default_wait_ready")]
+    pub wait_ready_ms: u64,
 }
 
 impl Default for DelegateConfig {
@@ -71,6 +105,12 @@ impl Default for DelegateConfig {
             submit: true,
             submit_delay_ms: default_submit_delay(),
             max_description_chars: default_max_desc(),
+            agents: default_spawn_agents(),
+            default_cwd: String::new(),
+            placement: default_placement(),
+            focus_new: false,
+            startup_delay_ms: default_startup_delay(),
+            wait_ready_ms: default_wait_ready(),
         }
     }
 }
@@ -92,6 +132,24 @@ fn default_submit_delay() -> u64 {
 }
 fn default_max_desc() -> usize {
     6000
+}
+fn default_placement() -> String {
+    "tab".into()
+}
+fn default_startup_delay() -> u64 {
+    1500
+}
+fn default_wait_ready() -> u64 {
+    30_000
+}
+fn default_spawn_agents() -> Vec<SpawnAgent> {
+    ["claude", "codex", "grok", "cursor", "opencode"]
+        .into_iter()
+        .map(|name| SpawnAgent {
+            name: name.into(),
+            command: vec![name.into()],
+        })
+        .collect()
 }
 fn default_prompt() -> String {
     "You are asked to work on Jira issue {key}: {summary}\n\n\

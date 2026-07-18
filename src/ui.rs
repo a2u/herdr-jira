@@ -31,6 +31,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::FilterPicker => draw_filter_picker(f, app),
         View::TransitionPicker => draw_transition_picker(f, app),
         View::AgentPicker => draw_agent_picker(f, app),
+        View::NewAgentTypePicker => draw_new_agent_type_picker(f, app),
+        View::NewAgentWorkspacePicker => draw_new_agent_workspace_picker(f, app),
+        View::NewAgentCwdPicker => draw_new_agent_cwd_picker(f, app),
+        View::NewAgentCwdInput => draw_cwd_input(f, app),
         View::SearchInput => draw_search(f, app),
         View::JqlInput => draw_jql(f, app),
         View::Help => draw_help(f),
@@ -204,7 +208,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         View::Detail => "Esc back  ·  j/k scroll  ·  s status  ·  d delegate  ·  o browser  ·  z zoom",
         View::SearchInput => "Enter search  ·  Esc cancel",
         View::JqlInput => "Enter run JQL  ·  Ctrl-U clear  ·  Esc cancel",
-        View::FilterPicker | View::TransitionPicker | View::AgentPicker => {
+        View::NewAgentCwdInput => "Enter start  ·  Ctrl-U clear  ·  Esc back",
+        View::AgentPicker => {
+            "1-9 pick  ·  n new agent  ·  j/k move  ·  Enter select  ·  Esc cancel"
+        }
+        View::NewAgentTypePicker
+        | View::NewAgentWorkspacePicker
+        | View::NewAgentCwdPicker => {
+            "1-9 pick  ·  j/k move  ·  Enter select  ·  Esc back"
+        }
+        View::FilterPicker | View::TransitionPicker => {
             "1-9 quick pick  ·  j/k move  ·  Enter select  ·  Esc cancel"
         }
         _ => "Enter open  ·  →/← epic  ·  f filters  ·  / search  ·  s status  ·  d delegate  ·  z zoom  ·  r refresh  ·  ? help  ·  q quit",
@@ -302,7 +315,7 @@ fn draw_agent_picker(f: &mut Frame, app: &App) {
         .map(|i| i.key.clone())
         .unwrap_or_default();
     let title = format!("delegate {key} to agent");
-    let h = (app.agents.len() as u16 + 2).max(3);
+    let h = (app.agent_picker_len() as u16 + 2).max(3);
     let inner = popup(f, &title, 70, h);
     if app.agents_loading {
         f.render_widget(
@@ -311,28 +324,201 @@ fn draw_agent_picker(f: &mut Frame, app: &App) {
         );
         return;
     }
-    let items: Vec<ListItem> = app
-        .agents
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.agent_picker_len());
+    let offset = app.agent_list_offset();
+    if offset > 0 {
+        items.push(ListItem::new(Line::from(vec![
+            num_span(0),
+            Span::styled(
+                "+ start new agent…",
+                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  (n)", Style::new().fg(Color::DarkGray)),
+        ])));
+    }
+    for (i, a) in app.agents.iter().enumerate() {
+        let row = i + offset;
+        let status_color = match a.status.as_str() {
+            "idle" | "done" => Color::Green,
+            "working" => Color::Yellow,
+            "blocked" => Color::Red,
+            _ => Color::Gray,
+        };
+        let cwd = short_path(&a.cwd);
+        items.push(ListItem::new(Line::from(vec![
+            num_span(row),
+            Span::styled(format!("{:<10}", a.label), Style::new().fg(ACCENT).bold()),
+            Span::styled(format!("{:<9}", a.status), Style::new().fg(status_color)),
+            Span::styled(format!("{:<8}", a.pane_id), Style::new().fg(Color::DarkGray)),
+            Span::raw(cwd),
+        ])));
+    }
+    if items.is_empty() {
+        f.render_widget(
+            Paragraph::new("no agents — add [[delegate.agents]] in config to start new ones")
+                .style(Style::new().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+    render_picker_list(f, inner, items, app.picker_sel);
+}
+
+fn draw_new_agent_type_picker(f: &mut Frame, app: &App) {
+    let key = app
+        .selected_issue()
+        .map(|i| i.key.clone())
+        .unwrap_or_default();
+    let title = format!("start agent for {key} — pick agent");
+    let agents = &app.cfg.delegate.agents;
+    let h = (agents.len() as u16 + 2).max(3);
+    let inner = popup(f, &title, 55, h);
+    let items: Vec<ListItem> = agents
         .iter()
         .enumerate()
         .map(|(i, a)| {
-            let status_color = match a.status.as_str() {
+            let cmd = a.command.join(" ");
+            ListItem::new(Line::from(vec![
+                num_span(i),
+                Span::styled(
+                    format!("{:<12}", a.name),
+                    Style::new().fg(ACCENT).bold(),
+                ),
+                Span::styled(cmd, Style::new().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+    render_picker_list(f, inner, items, app.picker_sel);
+}
+
+fn draw_new_agent_workspace_picker(f: &mut Frame, app: &App) {
+    let agent_name = app
+        .pending_spawn
+        .as_ref()
+        .map(|s| s.name.as_str())
+        .unwrap_or("agent");
+    let place = app.cfg.delegate.placement.trim().to_ascii_lowercase();
+    let place_hint = if place == "right" || place == "down" {
+        format!("split {place}")
+    } else {
+        "new tab".into()
+    };
+    let title = format!("space for {agent_name} ({place_hint})");
+    let h = (app.workspaces.len() as u16 + 2).max(3);
+    let inner = popup(f, &title, 70, h);
+    if app.workspaces_loading {
+        f.render_widget(
+            Paragraph::new("listing spaces…").style(Style::new().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+    let current = std::env::var("HERDR_WORKSPACE_ID").unwrap_or_default();
+    let items: Vec<ListItem> = app
+        .workspaces
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let marker = if !current.is_empty() && w.id == current {
+                "● "
+            } else if w.focused {
+                "○ "
+            } else {
+                "  "
+            };
+            let status_color = match w.agent_status.as_str() {
                 "idle" | "done" => Color::Green,
                 "working" => Color::Yellow,
                 "blocked" => Color::Red,
                 _ => Color::Gray,
             };
-            let cwd = short_path(&a.cwd);
             ListItem::new(Line::from(vec![
                 num_span(i),
-                Span::styled(format!("{:<10}", a.label), Style::new().fg(ACCENT).bold()),
-                Span::styled(format!("{:<9}", a.status), Style::new().fg(status_color)),
-                Span::styled(format!("{:<8}", a.pane_id), Style::new().fg(Color::DarkGray)),
-                Span::raw(cwd),
+                Span::styled(marker, Style::new().fg(Color::Green)),
+                Span::styled(
+                    format!("{:<4}", format!("#{}", w.number)),
+                    Style::new().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{:<24}", truncate_label(&w.label, 24)),
+                    Style::new().fg(ACCENT).bold(),
+                ),
+                Span::styled(
+                    format!("{:<8}", w.agent_status),
+                    Style::new().fg(status_color),
+                ),
+                Span::styled(
+                    format!("{} tabs · {} panes", w.tab_count, w.pane_count),
+                    Style::new().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
     render_picker_list(f, inner, items, app.picker_sel);
+}
+
+fn truncate_label(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        let take = max.saturating_sub(1);
+        format!("{}…", s.chars().take(take).collect::<String>())
+    }
+}
+
+fn draw_new_agent_cwd_picker(f: &mut Frame, app: &App) {
+    let agent_name = app
+        .pending_spawn
+        .as_ref()
+        .map(|s| s.name.as_str())
+        .unwrap_or("agent");
+    let ws = app
+        .pending_workspace
+        .as_ref()
+        .map(|w| w.label.as_str())
+        .unwrap_or("?");
+    let title = format!("cwd for {agent_name} in {ws}");
+    let n = app.cwd_choices.len() + 1;
+    let h = (n as u16 + 2).max(3);
+    let inner = popup(f, &title, 70, h.max(4));
+    let mut items: Vec<ListItem> = app
+        .cwd_choices
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            ListItem::new(Line::from(vec![
+                num_span(i),
+                Span::raw(short_path(p)),
+            ]))
+        })
+        .collect();
+    items.push(ListItem::new(Line::from(vec![
+        num_span(app.cwd_choices.len()),
+        Span::styled(
+            "type path…",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  (/)", Style::new().fg(Color::DarkGray)),
+    ])));
+    render_picker_list(f, inner, items, app.picker_sel);
+}
+
+fn draw_cwd_input(f: &mut Frame, app: &App) {
+    let agent_name = app
+        .pending_spawn
+        .as_ref()
+        .map(|s| s.name.as_str())
+        .unwrap_or("agent");
+    let title = format!("cwd for {agent_name}");
+    let inner = popup(f, &title, 75, 3);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(app.cwd_input.clone()),
+            Span::styled("▏", Style::new().fg(ACCENT)),
+        ])),
+        inner,
+    );
 }
 
 /// "1. " index prefix shown in pickers — rows past 9 have no hotkey.
@@ -378,7 +564,7 @@ fn draw_jql(f: &mut Frame, app: &App) {
 }
 
 fn draw_help(f: &mut Frame) {
-    let inner = popup(f, "help", 60, 18);
+    let inner = popup(f, "help", 60, 20);
     let rows = [
         ("j/k ↑/↓", "move / scroll"),
         ("Enter", "open issue details"),
@@ -389,6 +575,7 @@ fn draw_help(f: &mut Frame) {
         ("1-9", "quick pick in any popup"),
         ("s", "change issue status"),
         ("d", "delegate issue to an agent"),
+        ("n", "in delegate picker: start a new agent"),
         ("o", "open issue in browser"),
         ("z", "zoom pane (fullscreen toggle)"),
         ("r", "refresh current filter"),

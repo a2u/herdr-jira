@@ -78,3 +78,39 @@ submit_delay_ms = 500
 
 # Truncate very long descriptions in the prompt to this many characters.
 max_description_chars = 6000
+
+# --- Start a new agent from the delegate picker ---
+# With `d`, pick "+ start new agent…" (or press `n`) to spawn a fresh agent
+# via `herdr agent start`, then send the same prompt into it with Jira context.
+#
+# Agents offered in that wizard (name is the label; command is argv after --):
+[[delegate.agents]]
+name = "claude"
+command = ["claude"]
+
+[[delegate.agents]]
+name = "codex"
+command = ["codex"]
+
+[[delegate.agents]]
+name = "grok"
+command = ["grok"]
+
+# Optional preferred cwd (listed first in the directory picker).
+# default_cwd = "~/Work"
+
+# Where to place the new agent:
+#   "tab"   — dedicated new tab in the chosen space (default)
+#   "right" — split right in the chosen space
+#   "down"  — split down in the chosen space
+placement = "tab"
+
+# Focus the new agent tab/pane after start (default: leave focus on Jira).
+focus_new = false
+
+# Wait this long after start before sending the prompt (ms) — gives the CLI
+# time to draw its input line.
+startup_delay_ms = 1500
+
+# Then wait up to this many ms for the agent to report idle (0 = skip).
+wait_ready_ms = 30000

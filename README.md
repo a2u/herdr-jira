@@ -2,8 +2,9 @@
 
 A Jira TUI that lives in a [herdr](https://herdr.dev) pane: browse issues through
 configurable JQL filters, search, change issue status, and delegate an issue to
-any AI agent running in herdr with one key — the agent receives a prompt built
-from a configurable template (issue key, summary, description, link, …).
+any AI agent in herdr with one key — pick a running agent, or start a new one
+in a chosen directory. The agent receives a prompt built from a configurable
+template (issue key, summary, description, link, …).
 
 ```
 ╭ Jira — My open issues (23) ─────────────────────────────────────────╮
@@ -27,10 +28,12 @@ from a configurable template (issue key, summary, description, link, …).
   (Cloud ADF documents are flattened to plain text).
 - **Status transitions** — `s` lists the transitions available for the issue
   and applies the one you pick.
-- **Delegate to an agent** — `d` lists the agents currently running in herdr
-  (claude, codex, …) with their status and cwd; pick one and the issue is sent
-  to it as a prompt rendered from your `[delegate].prompt` template, then
-  submitted with Enter (configurable).
+- **Delegate to an agent** — `d` lists agents currently running in herdr
+  (claude, codex, grok, …) with status and cwd; pick one and the issue is sent
+  as a prompt from your `[delegate].prompt` template, then submitted with Enter
+  (configurable). Or choose **+ start new agent…** (`n`) to pick an agent type
+  and working directory — herdr spawns it via `agent start` and the same Jira
+  prompt is sent as soon as the agent is ready.
 
 Works with Jira Cloud (email + API token) and Jira Server / Data Center
 (personal access token). Cloud's newer `/rest/api/2/search/jql` endpoint is
@@ -85,6 +88,25 @@ Description:
 {description}
 """
 submit = true          # press Enter in the agent pane after sending
+
+# Agents you can spawn from the delegate picker ("+ start new agent…")
+[[delegate.agents]]
+name = "claude"
+command = ["claude"]
+
+[[delegate.agents]]
+name = "codex"
+command = ["codex"]
+
+[[delegate.agents]]
+name = "grok"
+command = ["grok"]
+
+# default_cwd = "~/Work"
+placement = "tab"      # "tab" | "right" | "down"
+focus_new = false
+startup_delay_ms = 1500
+wait_ready_ms = 30000
 ```
 
 For Jira Cloud, create an API token at
@@ -127,7 +149,8 @@ command = "herdr-jira.open-jira-tab"
 | `/` | search |
 | `J` | run a custom JQL query (prefilled with the current one) |
 | `s` | change issue status |
-| `d` | delegate issue to a running agent |
+| `d` | delegate issue to a running agent, or start a new one |
+| `n` | in the delegate picker: start a new agent |
 | `1`–`9` | quick pick inside any popup (agents, transitions, filters) |
 | `o` | open issue in the browser |
 | `r` | refresh current filter |
@@ -143,6 +166,33 @@ command = "herdr-jira.open-jira-tab"
 The prompt is sent with `herdr agent send` (literal text — newlines insert
 line breaks in agent CLIs, they don't submit), followed by an Enter keypress
 after `submit_delay_ms` when `submit = true`.
+
+### Starting a new agent
+
+From the delegate picker, **+ start new agent…** (or `n`) opens a short wizard:
+
+1. **Agent type** — from `[[delegate.agents]]` (name + `command` argv).
+2. **Space (workspace)** — pick which herdr space gets the agent (current space
+   is pre-selected).
+3. **Working directory** — unique cwds from running agents, optional
+   `default_cwd`, plus common paths; or **type path…** for a free-text path
+   (`~` and `$HOME/` expand).
+
+With `placement = "tab"` (default) the plugin creates a new tab labelled with
+the issue key and runs the agent **in that tab’s single root pane** (so you get
+one terminal, not a shell + agent split):
+
+```sh
+herdr tab create --workspace <space> --cwd <dir> --label <ISSUE-KEY> --no-focus
+herdr pane run <root-pane> '<command...>'
+herdr agent rename <root-pane> <issue-agent-id>
+```
+
+With `placement = "right"` or `"down"` it uses `herdr agent start --split …`
+in the chosen space instead.
+
+Then it waits `startup_delay_ms` (and up to `wait_ready_ms` for `idle`), and
+sends the same rendered Jira prompt into the new agent.
 
 ## License
 

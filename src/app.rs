@@ -1,14 +1,15 @@
 //! Application state and key handling. Network and herdr-CLI work runs on
 //! background threads; results come back over an mpsc channel as `Resp`.
 
-use crate::config::Config;
-use crate::herdr::{self, HerdrAgent};
+use crate::config::{Config, SpawnAgent};
+use crate::herdr::{self, HerdrAgent, HerdrWorkspace, StartAgentOpts};
 use crate::jira::{Issue, JiraClient, Transition};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -17,6 +18,14 @@ pub enum View {
     FilterPicker,
     TransitionPicker,
     AgentPicker,
+    /// Pick which agent binary to spawn (from `[delegate].agents`).
+    NewAgentTypePicker,
+    /// Pick which herdr workspace ("space") to place the new agent in.
+    NewAgentWorkspacePicker,
+    /// Pick a working directory for the new agent.
+    NewAgentCwdPicker,
+    /// Free-text cwd entry (from "type path…" in the cwd picker).
+    NewAgentCwdInput,
     SearchInput,
     JqlInput,
     Help,
@@ -37,6 +46,7 @@ pub enum Resp {
         result: Result<(), String>,
     },
     Agents(Result<Vec<HerdrAgent>, String>),
+    Workspaces(Result<Vec<HerdrWorkspace>, String>),
     Delegated {
         key: String,
         label: String,
@@ -80,6 +90,16 @@ pub struct App {
 
     pub agents: Vec<HerdrAgent>,
     pub agents_loading: bool,
+
+    /// Selected spawn agent while walking the "start new" wizard.
+    pub pending_spawn: Option<SpawnAgent>,
+    /// Selected workspace for the new agent.
+    pub pending_workspace: Option<HerdrWorkspace>,
+    pub workspaces: Vec<HerdrWorkspace>,
+    pub workspaces_loading: bool,
+    /// Unique cwd candidates for the new-agent cwd picker.
+    pub cwd_choices: Vec<String>,
+    pub cwd_input: String,
 
     pub search_input: String,
     pub jql_input: String,
@@ -125,6 +145,12 @@ impl App {
             transitions_loading: false,
             agents: vec![],
             agents_loading: false,
+            pending_spawn: None,
+            pending_workspace: None,
+            workspaces: vec![],
+            workspaces_loading: false,
+            cwd_choices: vec![],
+            cwd_input: String::new(),
             search_input: String::new(),
             jql_input: String::new(),
             last_jql: String::new(),
@@ -298,11 +324,76 @@ impl App {
         self.agents.clear();
         self.agents_loading = true;
         self.picker_sel = 0;
+        self.pending_spawn = None;
         self.view = View::AgentPicker;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Resp::Agents(herdr::list_agents()));
         });
+    }
+
+    /// Rows in the agent picker: optional "start new" at index 0, then running agents.
+    pub fn can_start_new_agent(&self) -> bool {
+        !self.cfg.delegate.agents.is_empty()
+    }
+
+    /// Index of the first running-agent row in AgentPicker (0 if no "start new").
+    pub fn agent_list_offset(&self) -> usize {
+        if self.can_start_new_agent() {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn agent_picker_len(&self) -> usize {
+        self.agent_list_offset() + self.agents.len()
+    }
+
+    fn open_new_agent_type_picker(&mut self) {
+        if self.cfg.delegate.agents.is_empty() {
+            self.toast(
+                "no [[delegate.agents]] configured — add agents in config.toml",
+                true,
+            );
+            return;
+        }
+        self.picker_sel = 0;
+        self.pending_spawn = None;
+        self.pending_workspace = None;
+        self.view = View::NewAgentTypePicker;
+    }
+
+    /// After agent type: load workspaces and open the space picker.
+    fn open_new_agent_workspace_picker(&mut self, spawn: SpawnAgent) {
+        self.pending_spawn = Some(spawn);
+        self.pending_workspace = None;
+        self.workspaces.clear();
+        self.workspaces_loading = true;
+        self.picker_sel = 0;
+        self.view = View::NewAgentWorkspacePicker;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Resp::Workspaces(herdr::list_workspaces()));
+        });
+    }
+
+    fn open_new_agent_cwd_picker(&mut self) {
+        self.cwd_choices = collect_cwd_choices(&self.cfg, &self.agents);
+        self.picker_sel = 0;
+        self.view = View::NewAgentCwdPicker;
+    }
+
+    fn open_cwd_input(&mut self) {
+        let pref = if !self.cfg.delegate.default_cwd.trim().is_empty() {
+            self.cfg.delegate.default_cwd.clone()
+        } else if let Some(first) = self.cwd_choices.first() {
+            first.clone()
+        } else {
+            std::env::var("HOME").unwrap_or_default()
+        };
+        self.cwd_input = pref;
+        self.view = View::NewAgentCwdInput;
     }
 
     fn delegate_to(&mut self, agent: HerdrAgent) {
@@ -315,7 +406,89 @@ impl App {
         self.toast(format!("sending {key} to {}…", agent.label), false);
         std::thread::spawn(move || {
             let result = herdr::send_to_agent(&agent, &text, submit, delay);
-            let _ = tx.send(Resp::Delegated { key, label: agent.label, result });
+            let _ = tx.send(Resp::Delegated {
+                key,
+                label: agent.label,
+                result,
+            });
+        });
+    }
+
+    /// Spawn a fresh agent in the chosen workspace + cwd, wait until ready,
+    /// send the Jira prompt.
+    fn start_new_and_delegate(&mut self, cwd_raw: String) {
+        let Some(issue) = self.selected_issue() else { return };
+        let Some(spawn) = self.pending_spawn.clone() else {
+            self.toast("no agent selected", true);
+            return;
+        };
+        let Some(ws) = self.pending_workspace.clone() else {
+            self.toast("no workspace selected", true);
+            return;
+        };
+        let cwd = herdr::expand_path(&cwd_raw);
+        if cwd.is_empty() {
+            self.toast("cwd is empty", true);
+            return;
+        }
+        if !Path::new(&cwd).is_dir() {
+            self.toast(format!("not a directory: {cwd}"), true);
+            return;
+        }
+        if spawn.command.is_empty() {
+            self.toast(format!("{}: empty command", spawn.name), true);
+            return;
+        }
+
+        let text = build_prompt(&self.cfg, issue);
+        let key = issue.key.clone();
+        let submit = self.cfg.delegate.submit;
+        let delay = self.cfg.delegate.submit_delay_ms;
+        let startup = self.cfg.delegate.startup_delay_ms;
+        let wait_ready = self.cfg.delegate.wait_ready_ms;
+        let placement = self.cfg.delegate.placement.clone();
+        let focus = self.cfg.delegate.focus_new;
+        let name = unique_agent_name(&key, &spawn.name);
+        let agent_label = spawn.name.clone();
+        let ws_label = ws.label.clone();
+        let opts = StartAgentOpts {
+            name,
+            cwd: cwd.clone(),
+            argv: spawn.command.clone(),
+            placement: placement.clone(),
+            focus,
+            workspace_id: ws.id.clone(),
+            tab_label: key.clone(),
+        };
+        let place_hint = if placement.eq_ignore_ascii_case("tab") || placement.is_empty() {
+            format!("new tab in {ws_label}")
+        } else {
+            format!("split {placement} in {ws_label}")
+        };
+        let tx = self.tx.clone();
+        self.toast(
+            format!(
+                "starting {agent_label} for {key} ({place_hint}, {})…",
+                short_home(&cwd)
+            ),
+            false,
+        );
+        std::thread::spawn(move || {
+            let result = herdr::start_and_delegate(
+                &opts,
+                &text,
+                submit,
+                delay,
+                startup,
+                wait_ready,
+            )
+            .map(|a| a.label);
+            let label = match &result {
+                Ok(l) => l.clone(),
+                Err(_) => agent_label,
+            };
+            let result = result.map(|_| ());
+            let _ = tx.send(Resp::Delegated { key, label, result });
         });
     }
 
@@ -378,16 +551,50 @@ impl App {
                 self.agents_loading = false;
                 match result {
                     Ok(agents) => {
-                        if agents.is_empty() {
+                        self.agents = agents;
+                        if self.agents.is_empty() && !self.can_start_new_agent() {
                             self.view = View::List;
-                            self.toast("no running agents found in herdr", true);
-                        } else {
-                            self.agents = agents;
+                            self.toast(
+                                "no running agents and no [[delegate.agents]] to start",
+                                true,
+                            );
                         }
                     }
                     Err(e) => {
-                        self.view = View::List;
-                        self.toast(format!("agents: {e}"), true);
+                        // Still allow starting a new agent if list failed.
+                        if self.can_start_new_agent() {
+                            self.agents.clear();
+                            self.toast(format!("list agents failed ({e}); start new is available"), true);
+                        } else {
+                            self.view = View::List;
+                            self.toast(format!("agents: {e}"), true);
+                        }
+                    }
+                }
+            }
+            Resp::Workspaces(result) => {
+                self.workspaces_loading = false;
+                if self.view != View::NewAgentWorkspacePicker {
+                    return;
+                }
+                match result {
+                    Ok(list) if list.is_empty() => {
+                        self.view = View::NewAgentTypePicker;
+                        self.toast("no workspaces found in herdr", true);
+                    }
+                    Ok(list) => {
+                        // Prefer the workspace that hosts this Jira pane.
+                        let current = std::env::var("HERDR_WORKSPACE_ID").unwrap_or_default();
+                        self.picker_sel = list
+                            .iter()
+                            .position(|w| !current.is_empty() && w.id == current)
+                            .or_else(|| list.iter().position(|w| w.focused))
+                            .unwrap_or(0);
+                        self.workspaces = list;
+                    }
+                    Err(e) => {
+                        self.view = View::NewAgentTypePicker;
+                        self.toast(format!("workspaces: {e}"), true);
                     }
                 }
             }
@@ -435,6 +642,10 @@ impl App {
             View::FilterPicker => self.keys_filter_picker(key),
             View::TransitionPicker => self.keys_transition_picker(key),
             View::AgentPicker => self.keys_agent_picker(key),
+            View::NewAgentTypePicker => self.keys_new_agent_type(key),
+            View::NewAgentWorkspacePicker => self.keys_new_agent_workspace(key),
+            View::NewAgentCwdPicker => self.keys_new_agent_cwd(key),
+            View::NewAgentCwdInput => self.keys_cwd_input(key),
             View::SearchInput => self.keys_search(key),
             View::JqlInput => self.keys_jql(key),
             View::Help => match key.code {
@@ -585,28 +796,163 @@ impl App {
         }
     }
 
+    fn pick_agent_row(&mut self, row: usize) {
+        let offset = self.agent_list_offset();
+        if offset > 0 && row == 0 {
+            self.open_new_agent_type_picker();
+            return;
+        }
+        let agent_idx = row.saturating_sub(offset);
+        if let Some(agent) = self.agents.get(agent_idx).cloned() {
+            self.view = View::List;
+            self.delegate_to(agent);
+        }
+    }
+
     fn keys_agent_picker(&mut self, key: KeyEvent) {
-        if let Some(idx) = Self::picker_number(&key, self.agents.len()) {
-            if let Some(agent) = self.agents.get(idx).cloned() {
-                self.view = View::List;
-                self.delegate_to(agent);
-            }
+        let len = self.agent_picker_len();
+        if let Some(idx) = Self::picker_number(&key, len) {
+            self.pick_agent_row(idx);
             return;
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.view = View::List,
+            KeyCode::Char('n') => self.open_new_agent_type_picker(),
             KeyCode::Char('j') | KeyCode::Down => {
-                self.picker_sel = Self::move_sel(self.agents.len(), self.picker_sel, 1)
+                self.picker_sel = Self::move_sel(len, self.picker_sel, 1)
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.picker_sel = Self::move_sel(self.agents.len(), self.picker_sel, -1)
+                self.picker_sel = Self::move_sel(len, self.picker_sel, -1)
+            }
+            KeyCode::Enter => self.pick_agent_row(self.picker_sel),
+            _ => {}
+        }
+    }
+
+    fn keys_new_agent_type(&mut self, key: KeyEvent) {
+        let agents = &self.cfg.delegate.agents;
+        if let Some(idx) = Self::picker_number(&key, agents.len()) {
+            if let Some(spawn) = agents.get(idx).cloned() {
+                self.open_new_agent_workspace_picker(spawn);
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Back to the running-agents list (not all the way to List).
+                self.picker_sel = 0;
+                self.view = View::AgentPicker;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.picker_sel = Self::move_sel(agents.len(), self.picker_sel, 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.picker_sel = Self::move_sel(agents.len(), self.picker_sel, -1)
             }
             KeyCode::Enter => {
-                if let Some(agent) = self.agents.get(self.picker_sel).cloned() {
-                    self.view = View::List;
-                    self.delegate_to(agent);
+                if let Some(spawn) = agents.get(self.picker_sel).cloned() {
+                    self.open_new_agent_workspace_picker(spawn);
                 }
             }
+            _ => {}
+        }
+    }
+
+    fn keys_new_agent_workspace(&mut self, key: KeyEvent) {
+        if self.workspaces_loading {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.view = View::NewAgentTypePicker;
+            }
+            return;
+        }
+        let n = self.workspaces.len();
+        if let Some(idx) = Self::picker_number(&key, n) {
+            self.pick_workspace_row(idx);
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.picker_sel = 0;
+                self.view = View::NewAgentTypePicker;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.picker_sel = Self::move_sel(n, self.picker_sel, 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.picker_sel = Self::move_sel(n, self.picker_sel, -1)
+            }
+            KeyCode::Enter => self.pick_workspace_row(self.picker_sel),
+            _ => {}
+        }
+    }
+
+    fn pick_workspace_row(&mut self, row: usize) {
+        let Some(ws) = self.workspaces.get(row).cloned() else {
+            return;
+        };
+        self.pending_workspace = Some(ws);
+        self.open_new_agent_cwd_picker();
+    }
+
+    fn keys_new_agent_cwd(&mut self, key: KeyEvent) {
+        // Last row is always "type path…"; rows above are concrete cwds.
+        let n = self.cwd_choices.len() + 1;
+        if let Some(idx) = Self::picker_number(&key, n) {
+            self.pick_cwd_row(idx);
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.picker_sel = self
+                    .pending_workspace
+                    .as_ref()
+                    .and_then(|pw| self.workspaces.iter().position(|w| w.id == pw.id))
+                    .unwrap_or(0);
+                self.view = View::NewAgentWorkspacePicker;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.picker_sel = Self::move_sel(n, self.picker_sel, 1)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.picker_sel = Self::move_sel(n, self.picker_sel, -1)
+            }
+            KeyCode::Char('/') | KeyCode::Char('e') => self.open_cwd_input(),
+            KeyCode::Enter => self.pick_cwd_row(self.picker_sel),
+            _ => {}
+        }
+    }
+
+    fn pick_cwd_row(&mut self, row: usize) {
+        if row >= self.cwd_choices.len() {
+            self.open_cwd_input();
+            return;
+        }
+        let cwd = self.cwd_choices[row].clone();
+        self.view = View::List;
+        self.start_new_and_delegate(cwd);
+    }
+
+    fn keys_cwd_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.view = View::NewAgentCwdPicker;
+            }
+            KeyCode::Enter => {
+                let cwd = self.cwd_input.trim().to_string();
+                if cwd.is_empty() {
+                    self.toast("cwd is empty", true);
+                    return;
+                }
+                self.view = View::List;
+                self.start_new_and_delegate(cwd);
+            }
+            KeyCode::Backspace => {
+                self.cwd_input.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cwd_input.clear();
+            }
+            KeyCode::Char(c) => self.cwd_input.push(c),
             _ => {}
         }
     }
@@ -735,4 +1081,64 @@ pub fn build_prompt(cfg: &Config, issue: &Issue) -> String {
         .replace("{labels}", &issue.labels.join(", "))
         .trim()
         .to_string()
+}
+
+/// Build cwd options: configured default, unique cwds from running agents,
+/// then common parents. Paths are stored expanded.
+fn collect_cwd_choices(cfg: &Config, agents: &[HerdrAgent]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let p = herdr::expand_path(raw);
+        if p.is_empty() || !Path::new(&p).is_dir() {
+            return;
+        }
+        if !out.iter().any(|x| x == &p) {
+            out.push(p);
+        }
+    };
+
+    if !cfg.delegate.default_cwd.trim().is_empty() {
+        push(&cfg.delegate.default_cwd);
+    }
+    for a in agents {
+        if !a.cwd.is_empty() {
+            // Skip herdr-mirror helper panes — not useful work dirs.
+            if a.cwd.contains("herdr-mirror") {
+                continue;
+            }
+            push(&a.cwd);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        push(&cwd.to_string_lossy());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        push(&home);
+        push(&format!("{home}/Work"));
+        push(&format!("{home}/Projects"));
+        push(&format!("{home}/src"));
+    }
+    out
+}
+
+/// Unique herdr agent name: issue key + agent label + short time suffix so a
+/// second delegate of the same issue does not collide.
+fn unique_agent_name(issue_key: &str, agent_label: &str) -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() % 10_000)
+        .unwrap_or(0);
+    // Keep names shell/CLI friendly.
+    let key = issue_key.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
+    let label = agent_label.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
+    format!("{key}-{label}-{secs}")
+}
+
+fn short_home(p: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && p.starts_with(&home) {
+        format!("~{}", &p[home.len()..])
+    } else {
+        p.to_string()
+    }
 }
